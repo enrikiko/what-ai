@@ -1,4 +1,4 @@
 #!/bin/sh
 set -e
 chown -R node:node /app/logs /app/contexts
-exec su-exec node node src/server.js
+exec su-exec node node /app/src/server.js
