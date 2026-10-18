@@ -5,7 +5,7 @@ Listens on port 80, accepts OpenWA events, logs the complete event, extracts cha
 ## Run
 1. Copy `.env.example` to `.env` and set `NVIDIA_API_KEY`.
 2. Choose a model from [NVIDIA Build](https://build.nvidia.com/models) in `NVIDIA_MODEL`.
-3. Configure OpenWA to POST new-message events to `http://<this-machine-ip>/webhook/openwa`.
+3. Configure OpenWA to POST new-message events to `http://<this-machine-ip>/webhook/openwa/v2`.
 4. Start with `npm start`.
 
 OpenWA is configured as `http://192.168.1.245:2785/`. Check with `GET /health`.
@@ -16,3 +16,4 @@ The generated reply is returned in the webhook response. Sending it back into Wh
 
 Structured JSON logs are written to `logs/app.log` and stdout, including request IDs, chat IDs, message IDs, extracted text, model responses, errors, and the full received payload.
 # what-ai
+
