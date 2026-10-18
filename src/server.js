@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 loadEnvFile();
-const config = { host: process.env.HOST || '0.0.0.0', port: Number(process.env.PORT || 80), webhookPath: process.env.WEBHOOK_PATH || '/webhook/openwa', webhookSecret: process.env.WEBHOOK_SECRET || '', openwaUrl: process.env.OPENWA_URL || 'http://192.168.1.245:2785/', openwaApiKey: process.env.OPENWA_API_KEY || '', openwaSessionId: process.env.OPENWA_SESSION_ID || '', nvidiaKey: process.env.NVIDIA_API_KEY || '', nvidiaBaseUrl: (process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, ''), model: process.env.NVIDIA_MODEL || 'nvidia/nemotron-3.5-super-vl-120b-a12b', temperature: Number(process.env.NVIDIA_TEMPERATURE || 0.2), maxTokens: Number(process.env.NVIDIA_MAX_TOKENS || 500), delayMinMs: Number(process.env.MESSAGE_DELAY_MIN_MS || 30000), delayMaxMs: Number(process.env.MESSAGE_DELAY_MAX_MS || 1800000), contextDir: process.env.CONTEXT_DIR || './contexts', contextMaxMessages: Number(process.env.CONTEXT_MAX_MESSAGES || 20), logDir: process.env.LOG_DIR || './logs' };
+const config = { host: process.env.HOST || '0.0.0.0', port: Number(process.env.PORT || 80), webhookPath: process.env.WEBHOOK_PATH || '/webhook/openwa', webhookSecret: process.env.WEBHOOK_SECRET || '', openwaUrl: process.env.OPENWA_URL || 'http://192.168.1.245:2785/', openwaApiKey: process.env.OPENWA_API_KEY || '', openwaSessionId: process.env.OPENWA_SESSION_ID || '', nvidiaKey: process.env.NVIDIA_API_KEY || '', nvidiaBaseUrl: (process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, ''), model: process.env.NVIDIA_MODEL || 'nvidia/nemotron-3.5-super-vl-120b-a12b', temperature: Number(process.env.NVIDIA_TEMPERATURE || 0.2), maxTokens: Number(process.env.NVIDIA_MAX_TOKENS || 500), delayMinMs: Number(process.env.MESSAGE_DELAY_MIN_MS || 30000), delayMaxMs: Number(process.env.MESSAGE_DELAY_MAX_MS || 1800000), contextDir: process.env.CONTEXT_DIR || './contexts', contextMaxMessages: Number(process.env.CONTEXT_MAX_MESSAGES || 20), nvidiaRetryDelayMs: Number(process.env.NVIDIA_RETRY_DELAY_MS || 60000), logDir: process.env.LOG_DIR || './logs' };
 const promptRules = fs.readFileSync(path.join(__dirname, '..', 'MODEL_REPLY_RULES.md'), 'utf8');
 const logDir = path.resolve(config.logDir); fs.mkdirSync(logDir, { recursive: true }); const contextDir = path.resolve(config.contextDir); fs.mkdirSync(contextDir, { recursive: true });
 function loadEnvFile() { const file = path.resolve('.env'); if (!fs.existsSync(file)) return; for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) { const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/); if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, ''); } }
@@ -43,6 +43,12 @@ async function sendReply(event, reply) {
   log('info', 'reply_sent', { chatId: event.chatId, sessionId, response: body });
   return body;
 }
+async function summarizeContext(context) {
+  const response = await fetch(`${config.nvidiaBaseUrl}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.nvidiaKey}` }, body: JSON.stringify({ model: config.model, temperature: 0.1, max_tokens: 700, messages: [{ role: 'system', content: 'Summarize this WhatsApp conversation for future continuity. Preserve names, preferences, facts, decisions, unresolved questions, and relevant context. Be concise. Return only the summary.' }, { role: 'user', content: JSON.stringify(context.messages) }] }) });
+  const body = await response.json();
+  if (!response.ok) throw new Error(`NVIDIA context summary API ${response.status}: ${JSON.stringify(body)}`);
+  return body.choices?.[0]?.message?.content?.trim() || '';
+}
 async function analyze(event, context) { if (!config.nvidiaKey || config.nvidiaKey === 'PASTE_YOUR_NVIDIA_API_KEY_HERE') throw new Error('NVIDIA_API_KEY is not configured'); const response = await fetch(`${config.nvidiaBaseUrl}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.nvidiaKey}` }, body: JSON.stringify({ model: config.model, temperature: config.temperature, max_tokens: config.maxTokens, messages: [{ role: 'system', content: promptRules }, ...context.messages, { role: 'user', content: JSON.stringify({ chatId: event.chatId, messageId: event.messageId, text: event.text, type: event.type, timestamp: event.timestamp, sender: event.sender }) }] }) }); const body = await response.json(); if (!response.ok) throw new Error(`NVIDIA API ${response.status}: ${JSON.stringify(body)}`); return body.choices?.[0]?.message?.content?.trim() || ''; }
 function randomDelayMs() {
   const min = Math.max(0, config.delayMinMs);
@@ -51,17 +57,41 @@ function randomDelayMs() {
 }
 
 async function processEvent(event, requestId, delayMs) {
-  try {
-    const context = loadContext(event.chatId); const reply = await analyze(event, context); context.messages.push({ role: 'user', content: event.text }); context.messages.push({ role: 'assistant', content: reply }); saveContext(event.chatId, context); log('info', 'conversation_context_saved', { requestId, chatId: event.chatId, messageCount: context.messages.length });
-    log('info', 'model_completed', { requestId, chatId: event.chatId, model: config.model, reply });
-    await sendReply(event, reply);
-  } catch (error) {
-    log('error', 'delayed_processing_failed', { requestId, chatId: event.chatId, error: error.message, stack: error.stack });
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      if (attempt === 2) log('info', 'nvidia_retry_started', { requestId, chatId: event.chatId });
+      const context = loadContext(event.chatId);
+      if (context.messages.length >= config.contextMaxMessages) {
+        const summary = await summarizeContext(context);
+        if (!summary) throw new Error('NVIDIA returned an empty conversation summary');
+        context.messages = [{ role: 'system', content: 'Conversation summary: ' + summary }];
+        saveContext(event.chatId, context);
+        log('info', 'conversation_context_compacted', { requestId, chatId: event.chatId, summaryLength: summary.length });
+      }
+      const reply = await analyze(event, context);
+      context.messages.push({ role: 'user', content: event.text });
+      context.messages.push({ role: 'assistant', content: reply });
+      saveContext(event.chatId, context);
+      log('info', 'conversation_context_saved', { requestId, chatId: event.chatId, messageCount: context.messages.length });
+      log('info', 'model_completed', { requestId, chatId: event.chatId, model: config.model, reply, attempt });
+      await sendReply(event, reply);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) {
+        log('warn', 'nvidia_call_failed_retry_scheduled', { requestId, chatId: event.chatId, retryInMs: config.nvidiaRetryDelayMs, error: error.message });
+        await new Promise(resolve => setTimeout(resolve, config.nvidiaRetryDelayMs));
+      }
+    }
   }
-}
-function readBody(req) { return new Promise((resolve, reject) => { let body = ''; req.on('data', chunk => { body += chunk; if (body.length > 2000000) req.destroy(new Error('Payload too large')); }); req.on('end', () => resolve(body)); req.on('error', reject); }); }
+  log('error', 'delayed_processing_failed', { requestId, chatId: event.chatId, error: lastError.message, stack: lastError.stack });
+}function readBody(req) { return new Promise((resolve, reject) => { let body = ''; req.on('data', chunk => { body += chunk; if (body.length > 2000000) req.destroy(new Error('Payload too large')); }); req.on('end', () => resolve(body)); req.on('error', reject); }); }
 const server = http.createServer(async (req, res) => { const requestId = crypto.randomUUID(); if (req.method === 'GET' && req.url === '/health') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ ok: true, openwaUrl: config.openwaUrl, model: config.model })); } if (req.method !== 'POST' || req.url.split('?')[0] !== config.webhookPath) { res.writeHead(404); return res.end('Not found'); } if (config.webhookSecret && req.headers['x-webhook-secret'] !== config.webhookSecret) { log('warn', 'webhook_rejected', { requestId, reason: 'invalid_secret' }); res.writeHead(401); return res.end('Unauthorized'); } try { const raw = await readBody(req); const payload = JSON.parse(raw || '{}'); const event = extractEvent(payload); log('info', 'webhook_received', { requestId, chatId: event.chatId, messageId: event.messageId, type: event.type, text: event.text, payload }); const delayMs = randomDelayMs(); log('info', 'message_processing_scheduled', { requestId, chatId: event.chatId, delayMs, delaySeconds: Math.round(delayMs / 1000), processAt: new Date(Date.now() + delayMs).toISOString() }); setTimeout(() => processEvent(event, requestId, delayMs), delayMs); res.writeHead(202, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, accepted: true, requestId, chatId: event.chatId, delayMs })); } catch (error) { log('error', 'webhook_failed', { requestId, error: error.message, stack: error.stack }); res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: false, requestId, error: error.message })); } });
 server.listen(config.port, config.host, () => log('info', 'server_started', { host: config.host, port: config.port, webhookPath: config.webhookPath, openwaUrl: config.openwaUrl })); server.on('error', error => log('error', 'server_error', { error: error.message }));
+
+
+
 
 
 
