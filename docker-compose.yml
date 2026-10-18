@@ -1,0 +1,26 @@
+services:
+  openwa-webhook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openwa-nvidia-webhook
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 80
+      OPENWA_URL: ${OPENWA_URL:-http://192.168.1.245:2785/}
+    volumes:
+      - webhook_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  webhook_logs:

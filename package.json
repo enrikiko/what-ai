@@ -1,0 +1,9 @@
+{
+  "name": "openwa-nvidia-webhook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenWA webhook receiver and NVIDIA model analyzer",
+  "main": "src/server.js",
+  "scripts": { "start": "node src/server.js", "dev": "node --watch src/server.js" },
+  "engines": { "node": ">=18" }
+}
