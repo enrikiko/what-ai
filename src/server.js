@@ -322,6 +322,18 @@ async function processEvent(event, requestId) {
   });
 }
 
+function readRecentLogs(limit = 300) {
+  const file = path.join(logDir, 'app.log');
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).filter(Boolean).slice(-Math.min(Math.max(Number(limit) || 300, 1), 1000)).map(line => {
+    try { return JSON.parse(line); }
+    catch { return { timestamp: '', level: 'error', event: 'invalid_log_line', raw: line }; }
+  });
+}
+
+function renderLogsPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OpenWA Logs</title><style>body{margin:0;background:#111827;color:#e5e7eb;font:14px system-ui,sans-serif}header{padding:18px 24px;background:#1f2937;display:flex;justify-content:space-between}main{padding:16px 24px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:9px 10px;border-bottom:1px solid #374151;text-align:left;vertical-align:top}th{color:#9ca3af}.message{white-space:pre-wrap;max-width:700px;word-break:break-word}.info{color:#86efac}.warn{color:#fde68a}.error{color:#fca5a5}button{padding:7px 12px;cursor:pointer}</style></head><body><header><h1>OpenWA Webhook Logs</h1><div><span id="status">Loading...</span> <button onclick="loadLogs()">Refresh</button></div></header><main><table><thead><tr><th>Time</th><th>Level</th><th>Event</th><th>Chat</th><th>Message</th></tr></thead><tbody id="logs"></tbody></table></main><script>const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));async function loadLogs(){const r=await fetch('/api/logs?limit=300');const logs=await r.json();document.getElementById('logs').innerHTML=logs.reverse().map(l=>'<tr class="'+esc(l.level)+'"><td>'+esc(l.timestamp)+'</td><td>'+esc(l.level)+'</td><td>'+esc(l.event)+'</td><td>'+esc(l.chatId)+'</td><td class="message">'+esc(l.reply||l.text||l.error||'')+'</td></tr>').join('');document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString()}loadLogs();setInterval(loadLogs,5000);</script></body></html>`;
+}
 function readBody(request) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -440,4 +452,5 @@ server.listen(config.port, config.host, () => {
 server.on('error', error => {
   log('error', 'server_error', { error: error.message });
 });
+
 
